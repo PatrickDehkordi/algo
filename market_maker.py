@@ -345,20 +345,41 @@ class State:
     realized_pnl: float = 0.0
     active_bid_id: Optional[str] = None
     active_ask_id: Optional[str] = None
+    bid_recorded_qty: float = 0.0  # cumulative qty already booked for active bid
+    ask_recorded_qty: float = 0.0  # cumulative qty already booked for active ask
 
     @property
     def avg_cost(self) -> float:
         return self.cost_basis / self.inventory if self.inventory else 0.0
 
     def record_buy(self, qty: float, price: float) -> None:
-        self.cost_basis += qty * price
-        self.inventory  += qty
+        if self.inventory < 0:
+            # Covering a short: realize PnL on the closed portion, then open long with remainder.
+            closed = min(qty, -self.inventory)
+            self.realized_pnl += closed * (self.avg_cost - price)
+            self.cost_basis   += closed * self.avg_cost  # reduces negative cost_basis toward 0
+            self.inventory    += qty
+            remainder = qty - closed
+            if remainder > 0:
+                self.cost_basis += remainder * price
+        else:
+            self.cost_basis += qty * price
+            self.inventory  += qty
 
     def record_sell(self, qty: float, price: float) -> None:
         if self.inventory > 0:
-            self.realized_pnl += qty * (price - self.avg_cost)
-            self.cost_basis   -= qty * self.avg_cost
-        self.inventory -= qty
+            # Closing a long: realize PnL on the closed portion, then open short with remainder.
+            closed = min(qty, self.inventory)
+            self.realized_pnl += closed * (price - self.avg_cost)
+            self.cost_basis   -= closed * self.avg_cost
+            self.inventory    -= qty
+            remainder = qty - closed
+            if remainder > 0:
+                self.cost_basis -= remainder * price  # negative cost_basis tracks short entry
+        else:
+            # Opening or adding to a short position.
+            self.cost_basis -= qty * price
+            self.inventory  -= qty
 
     def unrealized_pnl(self, mid: float) -> float:
         return self.inventory * (mid - self.avg_cost) if self.inventory else 0.0
@@ -414,23 +435,35 @@ def run(cfg: Config) -> None:
 
             if state.active_bid_id:
                 s, qty, price = rh.order_status(state.active_bid_id)
-                if s == "filled" and qty > 0:
-                    state.record_buy(qty, price)
+                delta = qty - state.bid_recorded_qty
+                if delta > 0 and price > 0:
+                    state.record_buy(delta, price)
+                    state.bid_recorded_qty += delta
+                    label = "BID FILLED" if s == "filled" else "BID PARTIAL"
+                    log.info(f"{label}  +{delta}@{price:.2f} | inv={state.inventory:.2f}")
+                if s == "filled":
                     bid_filled = True
-                    log.info(f"BID FILLED  +{qty}@{price:.2f} | inv={state.inventory:.2f}")
-                    state.active_bid_id = None
+                    state.active_bid_id    = None
+                    state.bid_recorded_qty = 0.0
                 elif s in ("cancelled", "failed", "rejected"):
-                    state.active_bid_id = None
+                    state.active_bid_id    = None
+                    state.bid_recorded_qty = 0.0
 
             if state.active_ask_id:
                 s, qty, price = rh.order_status(state.active_ask_id)
-                if s == "filled" and qty > 0:
-                    state.record_sell(qty, price)
+                delta = qty - state.ask_recorded_qty
+                if delta > 0 and price > 0:
+                    state.record_sell(delta, price)
+                    state.ask_recorded_qty += delta
+                    label = "ASK FILLED" if s == "filled" else "ASK PARTIAL"
+                    log.info(f"{label}  -{delta}@{price:.2f} | inv={state.inventory:.2f}")
+                if s == "filled":
                     ask_filled = True
-                    log.info(f"ASK FILLED  -{qty}@{price:.2f} | inv={state.inventory:.2f}")
-                    state.active_ask_id = None
+                    state.active_ask_id    = None
+                    state.ask_recorded_qty = 0.0
                 elif s in ("cancelled", "failed", "rejected"):
-                    state.active_ask_id = None
+                    state.active_ask_id    = None
+                    state.ask_recorded_qty = 0.0
 
             # ── 3. Fetch market quote ─────────────────────────────────────────
             result = rh.get_quote(cfg.symbol)
