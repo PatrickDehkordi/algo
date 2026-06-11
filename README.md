@@ -70,8 +70,8 @@ Then authenticate inside Claude Code:
 ## Installation
 
 ```bash
-git clone https://github.com/your-username/rh-market-maker.git
-cd rh-market-maker
+git clone https://github.com/PatrickDehkordi/algo.git
+cd algo
 
 pip install -r requirements.txt
 ```
