@@ -1,4 +1,4 @@
-# rh-market-maker
+# RobinHood Market Maker
 
 An Avellaneda-Stoikov market-making algorithm for Robinhood, executed through
 the official **Robinhood Agentic MCP** endpoint. No username/password required —
