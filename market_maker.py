@@ -529,7 +529,24 @@ def run(cfg: Config) -> None:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+def _load_dotenv() -> None:
+    """Load .env from the script's directory if RH_AGENTIC_ACCOUNT isn't already set."""
+    if os.environ.get("RH_AGENTIC_ACCOUNT"):
+        return
+    env_path = Path(__file__).parent / ".env"
+    if not env_path.exists():
+        return
+    with env_path.open() as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, _, v = line.partition("=")
+                os.environ.setdefault(k.strip(), v.strip())
+
+
 if __name__ == "__main__":
+    from pathlib import Path
+    _load_dotenv()
     ap = argparse.ArgumentParser(description="A-S market maker via Robinhood MCP")
     ap.add_argument("--account",             default=os.environ.get("RH_AGENTIC_ACCOUNT", ""),
                                              help="Agentic account number (or set RH_AGENTIC_ACCOUNT)")
