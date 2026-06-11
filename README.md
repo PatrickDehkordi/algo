@@ -80,16 +80,23 @@ pip install -r requirements.txt
 
 ## Running
 
+Your Agentic account number is required. Find it in the Robinhood app under
+**Account → Agentic**, or set it once as an env var to avoid typing it every run:
+
+```bash
+export RH_AGENTIC_ACCOUNT=your_account_number
+```
+
 ### Quick start (safe defaults — small size, tight loss limit)
 
 ```bash
-python market_maker.py --quote-size 0.1 --max-inventory 1.0 --max-loss 10
+python market_maker.py --account YOUR_ACCOUNT --quote-size 0.1 --max-inventory 1.0 --max-loss 10
 ```
 
 ### Default settings
 
 ```bash
-python market_maker.py
+python market_maker.py --account YOUR_ACCOUNT
 ```
 
 ### Full options
@@ -98,6 +105,7 @@ python market_maker.py
 python market_maker.py [OPTIONS]
 
 Core
+  --account TEXT             Agentic account number (or set RH_AGENTIC_ACCOUNT env var)
   --symbol TEXT              Stock to quote (default: SPY)
   --gamma FLOAT              Inventory risk aversion (default: 0.1)
   --kappa FLOAT              Initial order arrival rate (default: 1.5)
@@ -132,7 +140,7 @@ Fill-rate tracker (kappa auto-tuner)
 ## Sample log output
 
 ```
-10:01:00  INFO     === Market maker: SPY  account=435199179 ===
+10:01:00  INFO     === Market maker: SPY  account=<your-agentic-account> ===
 10:01:02  INFO     σ (GK 5min):  0.1284 (12.8% ann)  n=78
 10:01:03  INFO     σ (YZ daily): 0.1351 (13.5% ann)  n=29d
 10:01:03  INFO     σ (blend) = (0.1284 + 0.1351) / 2 = 0.1318

@@ -18,6 +18,7 @@ import math
 import time
 import logging
 import argparse
+import os
 from dataclasses import dataclass
 from typing import Optional
 
@@ -31,7 +32,7 @@ from rh_client import RHMCPClient
 @dataclass
 class Config:
     symbol: str = "SPY"
-    agentic_account: str = "435199179"
+    agentic_account: str = ""   # set via --account or RH_AGENTIC_ACCOUNT env var
 
     # Position limits
     max_inventory: float = 5.0
@@ -497,6 +498,8 @@ def run(cfg: Config) -> None:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="A-S market maker via Robinhood MCP")
+    ap.add_argument("--account",             default=os.environ.get("RH_AGENTIC_ACCOUNT", ""),
+                                             help="Agentic account number (or set RH_AGENTIC_ACCOUNT)")
     ap.add_argument("--symbol",              default="SPY")
     ap.add_argument("--gamma",               type=float, default=0.1)
     ap.add_argument("--sigma",               type=float, default=0.15,  help="Fallback vol")
@@ -521,7 +524,15 @@ if __name__ == "__main__":
     ap.add_argument("--frt-imbalance-warn",  type=float, default=0.25)
     args = ap.parse_args()
 
+    if not args.account:
+        raise SystemExit(
+            "Agentic account number required.\n"
+            "Pass --account XXXXXXXXX  or  export RH_AGENTIC_ACCOUNT=XXXXXXXXX\n"
+            "(find it in the Robinhood app under Account → Agentic)"
+        )
+
     cfg = Config(
+        agentic_account=args.account,
         symbol=args.symbol,
         gamma=args.gamma,
         sigma=args.sigma,
