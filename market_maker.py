@@ -22,6 +22,9 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 
+import datetime
+from zoneinfo import ZoneInfo
+
 import yfinance as yf
 
 from rh_client import RHMCPClient
@@ -41,7 +44,7 @@ class Config:
     # Avellaneda-Stoikov parameters
     gamma: float = 0.1
     sigma: float = 0.15             # fallback if vol estimator fails
-    T: float = 1 / 390             # time horizon per cycle (1 min / 6.5hr day)
+    T: float = 0.0                  # set at runtime: poll_interval / (390 × 60)
     kappa: float = 1.5
 
     # Spread bounds (applied after VoV multiplier)
@@ -67,6 +70,9 @@ class Config:
     frt_kappa_max: float = 15.0
     frt_adj_rate: float = 0.05
     frt_imbalance_warn: float = 0.25
+
+    # Session gating
+    session_skip_mins: int = 15     # skip quoting in first/last N min of session
 
     # Loop
     poll_interval: int = 30
@@ -336,6 +342,36 @@ def compute_quotes(mid: float, inventory: float, cfg: Config,
     return round(r_price - half, 2), round(r_price + half, 2)
 
 
+# ── Session-aware quoting ─────────────────────────────────────────────────────
+
+_ET = ZoneInfo("America/New_York")
+
+
+def session_state(cfg: Config) -> bool:
+    """True when the bot should be quoting (regular hours, outside edge windows)."""
+    now = datetime.datetime.now(_ET)
+    if now.weekday() >= 5:
+        return False
+    mo = now.replace(hour=9,  minute=30, second=0, microsecond=0)
+    mc = now.replace(hour=16, minute=0,  second=0, microsecond=0)
+    if now < mo or now >= mc:
+        return False
+    if cfg.session_skip_mins > 0:
+        skip = datetime.timedelta(minutes=cfg.session_skip_mins)
+        if now < mo + skip or now >= mc - skip:
+            return False
+    return True
+
+
+def compute_sizes(inventory: float, quote_size: float,
+                  max_inventory: float) -> tuple[float, float]:
+    """Scale bid/ask sizes inversely with inventory to de-risk naturally."""
+    ratio   = inventory / max_inventory if max_inventory else 0.0
+    bid_qty = round(max(0.1, quote_size * (1.0 - ratio)), 4)
+    ask_qty = round(max(0.1, quote_size * (1.0 + ratio)), 4)
+    return bid_qty, ask_qty
+
+
 # ── State ─────────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -393,12 +429,15 @@ def run(cfg: Config) -> None:
                         datefmt="%H:%M:%S")
     log = logging.getLogger("mm")
 
+    cfg.T = cfg.poll_interval / (390 * 60)   # #3: dynamic T per cycle
     log.info(f"=== Market maker: {cfg.symbol}  account={cfg.agentic_account} ===")
-    log.info(f"γ={cfg.gamma}  κ={cfg.kappa}  T={cfg.T:.5f}")
+    log.info(f"γ={cfg.gamma}  κ={cfg.kappa}  T={cfg.T:.6f}  ({cfg.poll_interval}s / 23400)")
     log.info(f"inventory±{cfg.max_inventory}  quote_size={cfg.quote_size}  poll={cfg.poll_interval}s")
     log.info(f"Vol:{cfg.vol_method.upper()} GK={cfg.vol_gk_lookback}bars YZ={cfg.vol_yz_lookback}d refresh={cfg.vol_refresh_secs}s")
     log.info(f"VoV:win={cfg.vov_window} thr={cfg.vov_threshold} scale={cfg.vov_scale} max={cfg.vov_max_mult}x")
     log.info(f"FRT:win={cfg.frt_window} tgt={cfg.frt_target:.0%} κ=[{cfg.frt_kappa_min},{cfg.frt_kappa_max}] adj={cfg.frt_adj_rate}")
+    log.info(f"Session: skip first/last {cfg.session_skip_mins}min  "
+             f"quotes 09:{30 + cfg.session_skip_mins:02d}–15:{60 - cfg.session_skip_mins:02d} ET")
 
     rh  = RHMCPClient(cfg.agentic_account)
     vol = VolEstimator(cfg.symbol, method=cfg.vol_method,
@@ -417,6 +456,13 @@ def run(cfg: Config) -> None:
     log.info(f"Initial σ={cfg.sigma:.4f}  half-spread=${optimal_half_spread(cfg):.4f}")
 
     state = State()
+    qty, avg_cost = rh.get_position(cfg.symbol)
+    if qty:
+        state.inventory  = qty
+        state.cost_basis = qty * avg_cost
+        log.info(f"Seeded from existing position: {qty} shares @ ${avg_cost:.2f} avg cost")
+    else:
+        log.info("No existing position found — starting flat")
 
     try:
         while True:
@@ -500,17 +546,27 @@ def run(cfg: Config) -> None:
                 rh.cancel(state.active_ask_id)
                 state.active_ask_id = None
 
-            # ── 6. Compute and place new quotes ───────────────────────────────
+            # ── 6. Session gate ───────────────────────────────────────────────
+            if not session_state(cfg):
+                log.info("Outside quoting window — waiting")
+                time.sleep(cfg.poll_interval)
+                continue
+
+            # ── 7. Compute and place new quotes ───────────────────────────────
             our_bid, our_ask = compute_quotes(mid, state.inventory, cfg, spread_mult)
-            log.info(f"Quoting  bid={our_bid}  ask={our_ask}  spread={our_ask - our_bid:.4f}")
+            bid_qty, ask_qty = compute_sizes(state.inventory, cfg.quote_size, cfg.max_inventory)
+            log.info(
+                f"Quoting  bid={our_bid}×{bid_qty}  ask={our_ask}×{ask_qty}  "
+                f"spread={our_ask - our_bid:.4f}"
+            )
 
             if state.inventory < cfg.max_inventory:
-                state.active_bid_id = rh.place_limit(cfg.symbol, "buy",  our_bid, cfg.quote_size)
+                state.active_bid_id = rh.place_limit(cfg.symbol, "buy",  our_bid, bid_qty)
             else:
                 log.info("Max long inventory — skipping bid")
 
             if state.inventory > -cfg.max_inventory:
-                state.active_ask_id = rh.place_limit(cfg.symbol, "sell", our_ask, cfg.quote_size)
+                state.active_ask_id = rh.place_limit(cfg.symbol, "sell", our_ask, ask_qty)
             else:
                 log.info("Max short inventory — skipping ask")
 
@@ -555,7 +611,8 @@ if __name__ == "__main__":
     ap.add_argument("--sigma",               type=float, default=0.15,  help="Fallback vol")
     ap.add_argument("--kappa",               type=float, default=1.5)
     ap.add_argument("--max-inventory",       type=float, default=5.0)
-    ap.add_argument("--quote-size",          type=float, default=1.0)
+    ap.add_argument("--quote-size",          type=float, default=1.0,
+                                             help="Order size in whole shares (fractional limit orders are not supported by Robinhood)")
     ap.add_argument("--poll-interval",       type=int,   default=30)
     ap.add_argument("--max-loss",            type=float, default=50.0)
     ap.add_argument("--vol-method",          default="blend", choices=["gk", "yz", "blend"])
@@ -572,7 +629,15 @@ if __name__ == "__main__":
     ap.add_argument("--frt-kappa-max",       type=float, default=15.0)
     ap.add_argument("--frt-adj-rate",        type=float, default=0.05)
     ap.add_argument("--frt-imbalance-warn",  type=float, default=0.25)
+    ap.add_argument("--session-skip-mins",   type=int,   default=15,
+                    help="Skip quoting in first/last N minutes of the session (0 to disable)")
     args = ap.parse_args()
+
+    if args.quote_size != int(args.quote_size) or args.quote_size < 1:
+        raise SystemExit(
+            f"--quote-size must be a whole number ≥ 1 (got {args.quote_size}).\n"
+            "Robinhood does not support fractional share limit orders."
+        )
 
     if not args.account:
         raise SystemExit(
@@ -605,5 +670,6 @@ if __name__ == "__main__":
         frt_kappa_max=args.frt_kappa_max,
         frt_adj_rate=args.frt_adj_rate,
         frt_imbalance_warn=args.frt_imbalance_warn,
+        session_skip_mins=args.session_skip_mins,
     )
     run(cfg)

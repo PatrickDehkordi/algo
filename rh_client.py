@@ -157,6 +157,23 @@ class RHMCPClient:
 
     # ── Convenience wrappers ──────────────────────────────────────────────────
 
+    def get_position(self, symbol: str) -> tuple[float, float]:
+        """Return (quantity, avg_cost) for symbol. Returns (0.0, 0.0) if no position."""
+        try:
+            result = self.call_tool("get_equity_positions", {
+                "account_number": self.account_number,
+            })
+            positions = result.get("data", {}).get("positions", [])
+            for p in positions:
+                if p.get("symbol", "").upper() == symbol.upper():
+                    qty  = float(p.get("quantity")         or 0)
+                    cost = float(p.get("average_buy_price") or 0)
+                    return qty, cost
+            return 0.0, 0.0
+        except Exception as exc:
+            log.warning(f"get_position({symbol}): {exc}")
+            return 0.0, 0.0
+
     def get_quote(self, symbol: str) -> Optional[tuple[float, float, float]]:
         """Return (bid, ask, mid). Returns None on failure."""
         try:
